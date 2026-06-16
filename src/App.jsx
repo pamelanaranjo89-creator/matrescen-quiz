@@ -1,6 +1,7 @@
 import { useState } from "react";
 
-// ── DESIGN TOKENS ─────────────────────────────────────────────────────────────
+const FORMSPREE_ENDPOINT = "https://formspree.io/f/mykaoqqr";
+
 const C = {
   parchment: "#FAF7F0",
   warm:      "#FDF9F3",
@@ -25,10 +26,6 @@ const MONTHS = [
   "January","February","March","April","May","June",
   "July","August","September","October","November","December"
 ];
-
-// ── STEPS DEFINITION ──────────────────────────────────────────────────────────
-// type: "text" | "pills_single" | "pills_multi" | "date_dropdowns" | "pills_multi_other"
-// labor step is conditional — rendered only if delivery !== "Planned C-section"
 
 const STEPS = [
   {
@@ -155,7 +152,6 @@ const STEPS = [
   },
 ];
 
-// ── HELPERS ───────────────────────────────────────────────────────────────────
 function getVisibleSteps(answers) {
   return STEPS.filter(s => !s.conditional || s.conditional(answers));
 }
@@ -176,7 +172,6 @@ function buildSummary(answers) {
   const weeks = weeksPostpartum(answers.birthDate);
   const conditions = (answers.conditions || []).filter(c => c !== "Other");
   if (answers.conditionsOther) conditions.push(`Other: ${answers.conditionsOther}`);
-
   const lines = [
     `NAME: ${answers.name || "Not provided"}`,
     `AGE: ${answers.age || "Not provided"}`,
@@ -188,7 +183,6 @@ function buildSummary(answers) {
     `PRE-PREGNANCY ACTIVITY: ${answers.activity || "Not provided"}`,
     `GOALS: ${(answers.goals || []).join(", ") || "Not specified"}`,
   ].filter(Boolean);
-
   return lines.join("\n");
 }
 
@@ -197,13 +191,14 @@ function daysInMonth(month, year) {
   return new Date(year, month, 0).getDate();
 }
 
-// ── MAIN COMPONENT ────────────────────────────────────────────────────────────
 export default function MatrescenQuiz() {
   const [step, setStep] = useState(0);
   const [answers, setAnswers] = useState({});
   const [textVal, setTextVal] = useState("");
   const [done, setDone] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState(false);
 
   const visibleSteps = getVisibleSteps(answers);
   const current = visibleSteps[step];
@@ -211,7 +206,6 @@ export default function MatrescenQuiz() {
   const progress = (step / totalSteps) * 100;
   const phaseIndex = Math.min(3, Math.floor((step / totalSteps) * 4));
 
-  // ── VALUE ACCESSORS ────────────────────────────────────────────────────────
   function getValue() {
     if (!current) return "";
     const v = answers[current.key];
@@ -220,7 +214,6 @@ export default function MatrescenQuiz() {
     return v || "";
   }
 
-  // ── HANDLERS ──────────────────────────────────────────────────────────────
   function handlePillSingle(val) {
     setAnswers(prev => ({ ...prev, [current.key]: val }));
   }
@@ -232,9 +225,7 @@ export default function MatrescenQuiz() {
       const filtered = arr.filter(v => v !== "None of the above");
       return {
         ...prev,
-        [current.key]: filtered.includes(val)
-          ? filtered.filter(v => v !== val)
-          : [...filtered, val],
+        [current.key]: filtered.includes(val) ? filtered.filter(v => v !== val) : [...filtered, val],
       };
     });
   }
@@ -245,26 +236,16 @@ export default function MatrescenQuiz() {
       if (val === "None of the above") return { ...prev, [current.key]: ["None of the above"], [current.otherKey]: "" };
       const filtered = arr.filter(v => v !== "None of the above");
       if (val === "Other") {
-        return {
-          ...prev,
-          [current.key]: filtered.includes("Other") ? filtered.filter(v => v !== "Other") : [...filtered, "Other"],
-        };
+        return { ...prev, [current.key]: filtered.includes("Other") ? filtered.filter(v => v !== "Other") : [...filtered, "Other"] };
       }
-      return {
-        ...prev,
-        [current.key]: filtered.includes(val) ? filtered.filter(v => v !== val) : [...filtered, val],
-      };
+      return { ...prev, [current.key]: filtered.includes(val) ? filtered.filter(v => v !== val) : [...filtered, val] };
     });
   }
 
   function handleDateDropdown(field, val) {
-    setAnswers(prev => ({
-      ...prev,
-      birthDate: { ...(prev.birthDate || {}), [field]: parseInt(val) },
-    }));
+    setAnswers(prev => ({ ...prev, birthDate: { ...(prev.birthDate || {}), [field]: parseInt(val) } }));
   }
 
-  // ── VALIDATION ─────────────────────────────────────────────────────────────
   function canAdvance() {
     if (!current) return false;
     const v = getValue();
@@ -280,19 +261,16 @@ export default function MatrescenQuiz() {
     return false;
   }
 
-  // ── NAVIGATION ─────────────────────────────────────────────────────────────
   function advance() {
+    let nextAnswers = answers;
     if (current.type === "text") {
-      setAnswers(prev => ({ ...prev, [current.key]: textVal.trim() }));
+      nextAnswers = { ...answers, [current.key]: textVal.trim() };
+      setAnswers(nextAnswers);
       setTextVal("");
     }
-    // Recompute visible steps after potential answer change
-    const nextAnswers = current.type === "text"
-      ? { ...answers, [current.key]: textVal.trim() }
-      : answers;
     const nextVisible = getVisibleSteps(nextAnswers);
     if (step < nextVisible.length - 1) setStep(s => s + 1);
-    else setDone(true);
+    else submitToFormspree(nextAnswers);
   }
 
   function goBack() {
@@ -303,14 +281,28 @@ export default function MatrescenQuiz() {
     }
   }
 
-  function copyToClipboard() {
-    navigator.clipboard.writeText(buildSummary(answers)).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
-    });
+  async function submitToFormspree(finalAnswers) {
+    setSending(true);
+    setDone(true);
+    const summary = buildSummary(finalAnswers);
+    try {
+      const res = await fetch(FORMSPREE_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({
+          name: finalAnswers.name,
+          profile: summary,
+        }),
+      });
+      if (res.ok) setSent(true);
+      else setError(true);
+    } catch {
+      setError(true);
+    } finally {
+      setSending(false);
+    }
   }
 
-  // ── STYLES ────────────────────────────────────────────────────────────────
   const st = {
     page: { background: C.parchment, minHeight: "100vh", fontFamily: font.body, padding: "0 0 80px" },
     header: { padding: "28px 24px 0", textAlign: "center" },
@@ -335,54 +327,22 @@ export default function MatrescenQuiz() {
       fontFamily: font.body, fontSize: 13, cursor: "pointer",
       transition: "all 0.18s ease", fontWeight: sel ? "600" : "400",
     }),
-    input: {
-      width: "100%", padding: "14px 18px",
-      border: `1.5px solid ${C.border}`, borderRadius: 14,
-      fontFamily: font.display, fontSize: 17, color: C.deep,
-      background: C.white, outline: "none", boxSizing: "border-box",
-    },
-    select: {
-      flex: 1, padding: "13px 14px",
-      border: `1.5px solid ${C.border}`, borderRadius: 14,
-      fontFamily: font.body, fontSize: 14, color: C.deep,
-      background: C.white, outline: "none", cursor: "pointer",
-      appearance: "none", WebkitAppearance: "none",
-    },
+    input: { width: "100%", padding: "14px 18px", border: `1.5px solid ${C.border}`, borderRadius: 14, fontFamily: font.display, fontSize: 17, color: C.deep, background: C.white, outline: "none", boxSizing: "border-box" },
+    select: { flex: 1, padding: "13px 14px", border: `1.5px solid ${C.border}`, borderRadius: 14, fontFamily: font.body, fontSize: 14, color: C.deep, background: C.white, outline: "none", cursor: "pointer", appearance: "none", WebkitAppearance: "none" },
     selectRow: { display: "flex", gap: 10 },
     selectLabel: { fontSize: 11, color: C.soft, marginBottom: 6, letterSpacing: "0.05em", fontFamily: font.body },
     selectWrap: { flex: 1, display: "flex", flexDirection: "column" },
-    otherInput: {
-      width: "100%", marginTop: 14, padding: "12px 16px",
-      border: `1.5px solid ${C.gold}`, borderRadius: 14,
-      fontFamily: font.body, fontSize: 13, color: C.deep,
-      background: C.goldFaint, outline: "none", boxSizing: "border-box",
-    },
+    otherInput: { width: "100%", marginTop: 14, padding: "12px 16px", border: `1.5px solid ${C.gold}`, borderRadius: 14, fontFamily: font.body, fontSize: 13, color: C.deep, background: C.goldFaint, outline: "none", boxSizing: "border-box" },
     navRow: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 32 },
     backBtn: { background: "transparent", border: "none", color: C.soft, fontSize: 13, cursor: "pointer", padding: "10px 0", fontFamily: font.body, letterSpacing: "0.05em" },
-    nextBtn: (active) => ({
-      background: active ? `linear-gradient(135deg, ${C.gold}, ${C.terra})` : C.border,
-      color: active ? C.white : C.soft, border: "none", borderRadius: 100,
-      padding: "14px 36px", fontFamily: font.display, fontSize: 14,
-      cursor: active ? "pointer" : "default", letterSpacing: "0.08em", transition: "all 0.2s ease",
-    }),
+    nextBtn: (active) => ({ background: active ? `linear-gradient(135deg, ${C.gold}, ${C.terra})` : C.border, color: active ? C.white : C.soft, border: "none", borderRadius: 100, padding: "14px 36px", fontFamily: font.display, fontSize: 14, cursor: active ? "pointer" : "default", letterSpacing: "0.08em", transition: "all 0.2s ease" }),
     doneCard: { background: C.warm, border: `1px solid ${C.border}`, borderRadius: 24, padding: "44px 28px 40px", marginTop: 28, textAlign: "center", boxShadow: "0 8px 40px rgba(42,31,14,0.08)" },
     doneGlyph: { fontSize: 44, color: C.gold, marginBottom: 16, display: "block" },
     doneTitle: { fontFamily: font.display, fontSize: 28, color: C.deep, marginBottom: 10 },
-    doneSubtitle: { fontSize: 14, color: C.mid, lineHeight: 1.65, marginBottom: 32 },
-    summaryBox: { background: C.parchment, border: `1px solid ${C.border}`, borderRadius: 14, padding: "20px", fontFamily: "monospace", fontSize: 12, color: C.mid, lineHeight: 1.75, textAlign: "left", whiteSpace: "pre-wrap", marginBottom: 20 },
-    copyBtn: (copied) => ({
-      background: copied ? C.goldFaint : `linear-gradient(135deg, ${C.gold}, ${C.terra})`,
-      color: copied ? C.mid : C.white, border: "none", borderRadius: 100,
-      padding: "16px 40px", fontFamily: font.display, fontSize: 14,
-      cursor: "pointer", letterSpacing: "0.08em", width: "100%",
-      marginBottom: 12, transition: "all 0.2s ease",
-    }),
-    instruction: { fontSize: 12, color: C.soft, lineHeight: 1.6, marginTop: 8 },
+    doneSubtitle: { fontSize: 14, color: C.mid, lineHeight: 1.65 },
   };
 
-  // ── DONE SCREEN ───────────────────────────────────────────────────────────
   if (done) {
-    const summary = buildSummary(answers);
     return (
       <div style={st.page}>
         <div style={st.header}>
@@ -393,18 +353,16 @@ export default function MatrescenQuiz() {
         </div>
         <div style={st.container}>
           <div style={st.doneCard}>
-            <span style={st.doneGlyph}>◈</span>
-            <div style={st.doneTitle}>Your profile is ready</div>
-            <div style={st.doneSubtitle}>
-              Copy the text below and paste it into your Matrescen chat.<br />
-              Your personalized protocol will be generated for you.
+            <span style={st.doneGlyph}>
+              {sending ? "◌" : sent ? "◈" : error ? "◎" : "◈"}
+            </span>
+            <div style={st.doneTitle}>
+              {sending ? "Sending your profile..." : sent ? "You're on your way" : error ? "Something went wrong" : "Done"}
             </div>
-            <div style={st.summaryBox}>{summary}</div>
-            <button style={st.copyBtn(copied)} onClick={copyToClipboard}>
-              {copied ? "✓  Copied to clipboard" : "Copy my profile"}
-            </button>
-            <div style={st.instruction}>
-              Paste this into the chat — your 9-month recovery protocol will be created in seconds.
+            <div style={st.doneSubtitle}>
+              {sending && "Just a moment while we send your information."}
+              {sent && "Your profile has been received. Your Matrescen protocol is on its way."}
+              {error && "We couldn't send your profile. Please try again or contact us directly."}
             </div>
           </div>
         </div>
@@ -412,7 +370,6 @@ export default function MatrescenQuiz() {
     );
   }
 
-  // ── QUIZ SCREEN ───────────────────────────────────────────────────────────
   const value = getValue();
   const dateVal = answers.birthDate || {};
   const maxDay = daysInMonth(dateVal.month, dateVal.year);
@@ -421,7 +378,6 @@ export default function MatrescenQuiz() {
 
   return (
     <div style={st.page}>
-      {/* Header */}
       <div style={st.header}>
         <div style={st.wordmark}>MATRESCEN</div>
         <div style={st.phases}>
@@ -429,7 +385,6 @@ export default function MatrescenQuiz() {
         </div>
       </div>
 
-      {/* Progress */}
       <div style={st.progressWrap}>
         <div style={st.progressMeta}>
           <span>{current.section}</span>
@@ -438,14 +393,12 @@ export default function MatrescenQuiz() {
         <div style={st.track}><div style={st.fill} /></div>
       </div>
 
-      {/* Card */}
       <div style={st.container}>
         <div style={st.card}>
           <div style={st.eyebrow}>{current.section}</div>
           <div style={st.question}>{current.title}</div>
           <div style={st.hint}>{current.hint}</div>
 
-          {/* TEXT */}
           {current.type === "text" && (
             <input
               style={st.input}
@@ -458,42 +411,25 @@ export default function MatrescenQuiz() {
             />
           )}
 
-          {/* DATE DROPDOWNS */}
           {current.type === "date_dropdowns" && (
             <div style={st.selectRow}>
               <div style={st.selectWrap}>
                 <div style={st.selectLabel}>DAY</div>
-                <select
-                  style={st.select}
-                  value={dateVal.day || ""}
-                  onChange={e => handleDateDropdown("day", e.target.value)}
-                >
+                <select style={st.select} value={dateVal.day || ""} onChange={e => handleDateDropdown("day", e.target.value)}>
                   <option value="">—</option>
-                  {Array.from({ length: maxDay }, (_, i) => i + 1).map(d => (
-                    <option key={d} value={d}>{d}</option>
-                  ))}
+                  {Array.from({ length: maxDay }, (_, i) => i + 1).map(d => <option key={d} value={d}>{d}</option>)}
                 </select>
               </div>
               <div style={st.selectWrap}>
                 <div style={st.selectLabel}>MONTH</div>
-                <select
-                  style={st.select}
-                  value={dateVal.month || ""}
-                  onChange={e => handleDateDropdown("month", e.target.value)}
-                >
+                <select style={st.select} value={dateVal.month || ""} onChange={e => handleDateDropdown("month", e.target.value)}>
                   <option value="">—</option>
-                  {MONTHS.map((m, i) => (
-                    <option key={i} value={i + 1}>{m}</option>
-                  ))}
+                  {MONTHS.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
                 </select>
               </div>
               <div style={st.selectWrap}>
                 <div style={st.selectLabel}>YEAR</div>
-                <select
-                  style={st.select}
-                  value={dateVal.year || ""}
-                  onChange={e => handleDateDropdown("year", e.target.value)}
-                >
+                <select style={st.select} value={dateVal.year || ""} onChange={e => handleDateDropdown("year", e.target.value)}>
                   <option value="">—</option>
                   {years.map(y => <option key={y} value={y}>{y}</option>)}
                 </select>
@@ -501,43 +437,32 @@ export default function MatrescenQuiz() {
             </div>
           )}
 
-          {/* PILLS SINGLE */}
           {current.type === "pills_single" && (
             <div style={st.pillGrid}>
               {current.options.map(opt => (
-                <button key={opt} style={st.pill(value === opt)} onClick={() => handlePillSingle(opt)}>
-                  {opt}
-                </button>
+                <button key={opt} style={st.pill(value === opt)} onClick={() => handlePillSingle(opt)}>{opt}</button>
               ))}
             </div>
           )}
 
-          {/* PILLS MULTI */}
           {current.type === "pills_multi" && (
             <>
               <div style={st.pillGrid}>
                 {current.options.map(opt => (
-                  <button key={opt} style={st.pill(value.includes(opt))} onClick={() => handlePillMulti(opt)}>
-                    {opt}
-                  </button>
+                  <button key={opt} style={st.pill(value.includes(opt))} onClick={() => handlePillMulti(opt)}>{opt}</button>
                 ))}
               </div>
               <div style={{ fontSize: 11, color: C.soft, marginTop: 14, fontFamily: font.body }}>Select all that apply</div>
             </>
           )}
 
-          {/* PILLS MULTI + OTHER */}
           {current.type === "pills_multi_other" && (
             <>
               <div style={st.pillGrid}>
                 {current.options.map(opt => (
-                  <button key={opt} style={st.pill(value.includes(opt))} onClick={() => handlePillMultiOther(opt)}>
-                    {opt}
-                  </button>
+                  <button key={opt} style={st.pill(value.includes(opt))} onClick={() => handlePillMultiOther(opt)}>{opt}</button>
                 ))}
-                <button style={st.pill(value.includes("Other"))} onClick={() => handlePillMultiOther("Other")}>
-                  Other
-                </button>
+                <button style={st.pill(value.includes("Other"))} onClick={() => handlePillMultiOther("Other")}>Other</button>
               </div>
               {value.includes("Other") && (
                 <input
@@ -552,13 +477,12 @@ export default function MatrescenQuiz() {
             </>
           )}
 
-          {/* NAV */}
           <div style={st.navRow}>
             <button style={st.backBtn} onClick={goBack} disabled={step === 0}>
               {step > 0 ? "← Back" : ""}
             </button>
             <button style={st.nextBtn(canAdvance())} onClick={canAdvance() ? advance : undefined}>
-              {step === totalSteps - 1 ? "Generate my profile" : "Continue →"}
+              {step === totalSteps - 1 ? "Send my profile" : "Continue →"}
             </button>
           </div>
         </div>
